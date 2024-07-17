@@ -3,8 +3,10 @@ import { asyncHandler } from "../utils/asyncHandler.js"
 import { User } from "../models/user.model.js"
 import { uploadOnCloudinary } from "../utils/cloudinary.js"
 import { ApiResponse } from "../utils/ApiResponse.js"
+import jwt from "jsonwebtoken"
+import { trusted } from "mongoose"
 
-const generateAccessAndRefreshTockens = async(userId) => {
+const generateAccessAndRefreshTokens = async(userId) => {
     try{
         const user = await User.findById(userId)
         const accessToken = user.generateAccessToken()
@@ -12,10 +14,10 @@ const generateAccessAndRefreshTockens = async(userId) => {
 
         user.refreshToken = refreshToken
         await user.save({ validateBeforeSave: false })
-        return  {accessToken, refreshToken}
+        return {accessToken, refreshToken}
 
     } catch (error){
-        throw new ApiError(500, "Something went wrong while generating access and refresh tocken")
+        throw new ApiError(500, "Something went wrong while generating access and refresh token")
     }
 }
 
@@ -41,12 +43,7 @@ const registerUser = asyncHandler(async (req, res) => {
 
     const existedUser = await User.findOne({
         $or: [{ username }, { email }]
-
-    }).then((docs) => {
-        console.log("Result :", docs);
-    }).catch((err) => {
-        console.log(err);
-    });
+    })
 
     // console.log("existedUser:", existedUser)
 
@@ -106,25 +103,34 @@ const loginUser = asyncHandler(async (req, res) => {
     const {email, username, password} = req.body
 
     if (!(username || email)){
-        throw new ApiError(400, "username or email is requires")
+        throw new ApiError(400, "username or email is required")
     }
 
     const user = await User.findOne({
-        $or:[{username},{email}]
-    }
-    )
-
+        $or: [{ username }, { email }]
+    });
+    
     if (!user) {
         throw new ApiError(404, "user not found username or email is incorrect")
     }
 
-    const isPasswordValid = await user.isPasswordCorrect(password)
+    const isPasswordValid = await user.isPasswordCorrect(password).then((docs) => {
+        console.log("valid :", docs);
+        return docs;
+    }).catch((err) => {
+        console.log(err);
+    });
+    
+
+    console.log("Pass",isPasswordValid)
 
     if (!isPasswordValid){
         throw new ApiError(401, "Invalid user credentials")
     }
 
-    const {accessToken, refreshToken} = await generateAccessAndRefreshTockens(user._id)
+    const {accessToken, refreshToken} = await generateAccessAndRefreshTokens(user._id)
+
+    console.log(accessToken)
 
     const loggedInUser = await User.findById(user._id).select("-password -refreshToken")
 
@@ -171,6 +177,52 @@ const logoutUser = asyncHandler(async(req, res) => {
         .json(new ApiResponse(200, {}, "User logged Out"))
 })
 
+const refreshAcesssToken = asyncHandler(async(req,res) => {
+    const incomingRefreshToken = req.cookie.refreshToken || req.body.refreshToken
+
+    if(!incomingRefreshToken) {
+        throw new ApiError(401,"unauthorized request")
+    }
+
+    try {
+        const decodedToken = jwt.verify(
+            incomingRefreshToken,
+            process.env.REFRESH_TOKEN_SECRET
+        )
+    
+        const user = await User.findById(decodedToken?._id)
+    
+        if (!user) {
+            throw new ApiError(401,"Invalid refresh token")
+        }
+    
+        if(incomingRefreshToken !== user?.refreshToken) {
+            throw new ApiError(401,"refresh token is expired or used")
+        }
+    
+        const options = {
+            httpOnly: true,
+            secure: true
+        }
+    
+        
+        const {accessToken, newRefreshToken} = await generateAccessAndRefreshTokens(user._id)
+    
+        return res
+        .status(200)
+        .cookie("accesstoken",accessToken, options)
+        .cookie("refreshToken",newRefreshToken,options)
+        .json(
+            200,
+            {accessToken, refreshToken: newRefreshToken},
+            "Access Token Refreshed"
+        )
+    } catch (error) {
+        throw new ApiError(401,error?.message || "invalid refresh token")
+    }
+})
+
 export { registerUser,
          loginUser,
-         logoutUser }
+         logoutUser,
+         refreshAcesssToken }
